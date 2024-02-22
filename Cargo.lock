@@ -162,7 +162,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "bip300"
+name = "bip300_messages"
+version = "0.1.0"
+source = "git+https://github.com/LayerTwo-Labs/bip300_messages#0981638a58a94ed5a574e578a1e21067dfcb32ee"
+dependencies = [
+ "bitcoin",
+ "byteorder",
+ "miette",
+ "nom",
+ "sha2",
+]
+
+[[package]]
+name = "bip300_monitor"
 version = "0.1.0"
 dependencies = [
  "bincode",
@@ -180,18 +192,6 @@ dependencies = [
  "tonic",
  "tonic-build",
  "ureq-jsonrpc",
-]
-
-[[package]]
-name = "bip300_messages"
-version = "0.1.0"
-source = "git+https://github.com/LayerTwo-Labs/bip300_messages#0981638a58a94ed5a574e578a1e21067dfcb32ee"
-dependencies = [
- "bitcoin",
- "byteorder",
- "miette",
- "nom",
- "sha2",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 [package]
-name = "bip300"
+name = "bip300_monitor"
 version = "0.1.0"
 edition = "2021"
 
