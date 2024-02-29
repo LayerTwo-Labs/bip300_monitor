@@ -10,6 +10,7 @@ use miette::{IntoDiagnostic, Result};
 
 mod server;
 mod types;
+mod bip300;
 
 use server::{bip300::validator_server::ValidatorServer, Bip300};
 use tonic::transport::Server;
