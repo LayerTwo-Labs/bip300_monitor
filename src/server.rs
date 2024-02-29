@@ -1,47 +1,31 @@
 use std::io::Cursor;
-use std::mem::size_of;
 
 use bitcoin::absolute::Height;
 use bitcoin::consensus::{Decodable, Encodable};
-use bitcoin::hashes::Hash;
 use bitcoin::opcodes::all::OP_PUSHBYTES_1;
 use bitcoin::opcodes::OP_TRUE;
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, Block, OutPoint, Transaction, TxOut, Txid};
+use bitcoin::{Amount, Block, OutPoint, Transaction, TxOut};
 use miette::{miette, IntoDiagnostic, Result};
 use tonic::{Request, Response, Status};
-
-use byteorder::{BigEndian, ByteOrder};
 
 use bip300::validator_server::Validator;
 use bip300::{ConnectBlockRequest, ConnectBlockResponse};
 use bip300::{DisconnectBlockRequest, DisconnectBlockResponse};
 use bip300::{IsValidRequest, IsValidResponse};
 
-use redb::{Database, ReadableTable, RedbValue, TableDefinition, TypeName};
-
-use serde::{Deserialize, Serialize};
+use redb::{Database, ReadableTable, TableDefinition};
 
 use self::bip300::{AckBundlesEnum, GetCoinbasePsbtRequest, GetCoinbasePsbtResponse};
+use crate::types::*;
 use bip300_messages::{
     parse_coinbase_script, sha256d, CoinbaseMessage, M4AckBundles, ABSTAIN_ONE_BYTE,
     ABSTAIN_TWO_BYTES, ALARM_ONE_BYTE, ALARM_TWO_BYTES, OP_DRIVECHAIN,
 };
 
-type Hash256 = [u8; 32];
-
 pub mod bip300 {
     tonic::include_proto!("validator");
 }
-
-// data_hash -> { sidechain_number, data, vote_count }
-// bundle_txid -> { sidechain_number, bundle, vote_count }
-// (sidechain_number, deposit_number) -> { address, value }
-
-// Atomic Swap support
-// Standard deposits
-// Standard withdrawals
-// Standard BIP300
 
 const DATA_HASH_TO_SIDECHAIN_PROPOSAL: TableDefinition<&Hash256, SidechainProposal> =
     TableDefinition::new("data_hash_to_sidechain_proposal");
@@ -59,16 +43,6 @@ const LEADING_BY_50: TableDefinition<(), Vec<&Hash256>> = TableDefinition::new("
 
 const SIDECHAIN_NUMBER_TO_CTIP: TableDefinition<u8, Ctip> =
     TableDefinition::new("sidechain_number_to_ctip");
-
-/*
-data_hash_to_sidechain_proposal: Database<OwnedType<Hash256>, SerdeBincode<SidechainProposal>>,
-bundle_txid_to_bundle: Database<OwnedType<Hash256>, SerdeBincode<Bundle>>,
-
-// big endian number
-// 0th byte - 8 bit sidechain number
-// 1..9 bytes - 64 bit deposit number
-deposit_txos: Database<OwnedType<[u8; 9]>, SerdeBincode<Deposit>>,
-*/
 
 pub struct Bip300 {
     db: Database,
@@ -388,217 +362,6 @@ impl Bip300 {
     }
 }
 
-#[derive(Debug)]
-struct Ctip {
-    outpoint: OutPoint,
-    value: u64,
-}
-
-impl RedbValue for Ctip {
-    type SelfType<'a> = Ctip;
-    type AsBytes<'a> = [u8; size_of::<Ctip>()];
-
-    fn type_name() -> TypeName {
-        TypeName::new("Ctip")
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        [
-            value.outpoint.txid.to_byte_array().to_vec(),
-            value.outpoint.vout.to_be_bytes().to_vec(),
-            value.value.to_be_bytes().to_vec(),
-        ]
-        .concat()
-        .try_into()
-        .unwrap()
-    }
-
-    fn fixed_width() -> Option<usize> {
-        Some(size_of::<Ctip>())
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        let txid = Txid::from_slice(&data[0..32]).unwrap();
-        let data = &data[32..];
-        let vout = BigEndian::read_u32(data);
-        let data = &data[4..];
-        let value = BigEndian::read_u64(data);
-        Ctip {
-            outpoint: OutPoint { txid, vout },
-            value,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Deposit {
-    address: Hash256,
-    value: u64,
-    total_value: u64,
-}
-
-impl RedbValue for Deposit {
-    type SelfType<'a> = Deposit;
-    type AsBytes<'a> = [u8; size_of::<Hash256>() + size_of::<u64>() + size_of::<u64>()];
-
-    fn type_name() -> TypeName {
-        TypeName::new("Deposit")
-    }
-
-    fn fixed_width() -> Option<usize> {
-        Some(size_of::<Hash256>() + size_of::<u64>())
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        let address: Hash256 = data[0..size_of::<Hash256>()].try_into().unwrap();
-        let data = &data[size_of::<Hash256>()..];
-        let value = BigEndian::read_u64(data);
-        let data = &data[size_of::<u64>()..];
-        let total_value = BigEndian::read_u64(data);
-        Deposit {
-            address,
-            value,
-            total_value,
-        }
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        let mut data = [0; size_of::<Hash256>() + size_of::<u64>() + size_of::<u64>()];
-        data[0..size_of::<Hash256>()].copy_from_slice(&value.address);
-        BigEndian::write_u64(
-            &mut data[size_of::<Hash256>()..size_of::<Hash256>() + size_of::<u64>()],
-            value.value,
-        );
-        BigEndian::write_u64(
-            &mut data[size_of::<Hash256>() + size_of::<u64>()
-                ..size_of::<Hash256>() + 2 * size_of::<u64>()],
-            value.total_value,
-        );
-        data
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Sidechain {
-    sidechain_number: u8,
-    data: Vec<u8>,
-    vote_count: u16,
-    proposal_height: u32,
-    activation_height: u32,
-}
-
-impl RedbValue for Sidechain {
-    type SelfType<'a> = Sidechain;
-    type AsBytes<'a> = Vec<u8>;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        bincode::deserialize(data).unwrap()
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        bincode::serialize(value).unwrap()
-    }
-
-    fn type_name() -> redb::TypeName {
-        TypeName::new("Sidechain")
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SidechainProposal {
-    sidechain_number: u8,
-    data: Vec<u8>,
-    vote_count: u16,
-    proposal_height: u32,
-}
-
-impl RedbValue for SidechainProposal {
-    type SelfType<'a> = SidechainProposal;
-    type AsBytes<'a> = Vec<u8>;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        bincode::deserialize(data).unwrap()
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        bincode::serialize(value).unwrap()
-    }
-
-    fn type_name() -> redb::TypeName {
-        TypeName::new("SidechainProposal")
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Bundle {
-    bundle_txid: Hash256,
-    vote_count: u16,
-}
-
-impl RedbValue for Bundle {
-    type SelfType<'a> = Bundle;
-    type AsBytes<'a> = Vec<u8>;
-
-    fn type_name() -> TypeName {
-        TypeName::new("Bundle")
-    }
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        bincode::serialize(value).unwrap()
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        bincode::deserialize(data).unwrap()
-    }
-}
-
 #[tonic::async_trait]
 impl Validator for Bip300 {
     async fn is_valid(
@@ -720,3 +483,6 @@ impl Validator for Bip300 {
         Ok(Response::new(response))
     }
 }
+
+// What should happen if new CTIP value is equal to old CTIP value?
+// How is the deposit address encoded?

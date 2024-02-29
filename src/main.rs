@@ -9,6 +9,7 @@ use bitcoin::{
 use miette::{IntoDiagnostic, Result};
 
 mod server;
+mod types;
 
 use server::{bip300::validator_server::ValidatorServer, Bip300};
 use tonic::transport::Server;
