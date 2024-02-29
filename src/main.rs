@@ -1,5 +1,3 @@
-// 0b65bc611f8cb22f782d59a71a4eb68dacc348bccbfa04e0bfc83589c94ed656
-
 use std::time::SystemTime;
 
 use bitcoin::{

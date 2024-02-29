@@ -3,9 +3,11 @@ use std::mem::size_of;
 
 use bitcoin::absolute::Height;
 use bitcoin::consensus::{Decodable, Encodable};
+use bitcoin::hashes::Hash;
+use bitcoin::opcodes::all::OP_PUSHBYTES_1;
+use bitcoin::opcodes::OP_TRUE;
 use bitcoin::transaction::Version;
-// 0b65bc611f8cb22f782d59a71a4eb68dacc348bccbfa04e0bfc83589c94ed656
-use bitcoin::{Amount, Block, Transaction, TxOut};
+use bitcoin::{Amount, Block, OutPoint, Transaction, TxOut, Txid};
 use miette::{miette, IntoDiagnostic, Result};
 use tonic::{Request, Response, Status};
 
@@ -23,10 +25,8 @@ use serde::{Deserialize, Serialize};
 use self::bip300::{AckBundlesEnum, GetCoinbasePsbtRequest, GetCoinbasePsbtResponse};
 use bip300_messages::{
     parse_coinbase_script, sha256d, CoinbaseMessage, M4AckBundles, ABSTAIN_ONE_BYTE,
-    ABSTAIN_TWO_BYTES, ALARM_ONE_BYTE, ALARM_TWO_BYTES,
+    ABSTAIN_TWO_BYTES, ALARM_ONE_BYTE, ALARM_TWO_BYTES, OP_DRIVECHAIN,
 };
-
-use sha2::{Digest, Sha256};
 
 type Hash256 = [u8; 32];
 
@@ -57,12 +57,8 @@ const PREVIOUS_VOTES: TableDefinition<(), Vec<&Hash256>> =
 
 const LEADING_BY_50: TableDefinition<(), Vec<&Hash256>> = TableDefinition::new("leading_by_50");
 
-// Generate these table definitions dynamically.
-const DEPOSIT_TXOS_0: TableDefinition<u64, Deposit> = TableDefinition::new("deposit_txos_0");
-const DEPOSIT_TXOS_1: TableDefinition<u64, Deposit> = TableDefinition::new("deposit_txos_1");
-const DEPOSIT_TXOS_2: TableDefinition<u64, Deposit> = TableDefinition::new("deposit_txos_2");
-const DEPOSIT_TXOS_3: TableDefinition<u64, Deposit> = TableDefinition::new("deposit_txos_3");
-const DEPOSIT_TXOS_4: TableDefinition<u64, Deposit> = TableDefinition::new("deposit_txos_4");
+const SIDECHAIN_NUMBER_TO_CTIP: TableDefinition<u8, Ctip> =
+    TableDefinition::new("sidechain_number_to_ctip");
 
 /*
 data_hash_to_sidechain_proposal: Database<OwnedType<Hash256>, SerdeBincode<SidechainProposal>>,
@@ -76,49 +72,6 @@ deposit_txos: Database<OwnedType<[u8; 9]>, SerdeBincode<Deposit>>,
 
 pub struct Bip300 {
     db: Database,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Deposit {
-    address: Hash256,
-    value: u64,
-}
-
-impl RedbValue for Deposit {
-    type SelfType<'a> = Deposit;
-    type AsBytes<'a> = [u8; size_of::<Hash256>() + size_of::<u64>()];
-
-    fn type_name() -> TypeName {
-        TypeName::new("Deposit")
-    }
-
-    fn fixed_width() -> Option<usize> {
-        Some(size_of::<Hash256>() + size_of::<u64>())
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        let address: Hash256 = data[0..size_of::<Hash256>()].try_into().unwrap();
-        let data = &data[size_of::<Hash256>()..];
-        let value = BigEndian::read_u64(data);
-        Deposit { address, value }
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        let mut data = [0; size_of::<Hash256>() + size_of::<u64>()];
-        data[0..size_of::<Hash256>()].copy_from_slice(&value.address);
-        BigEndian::write_u64(
-            &mut data[size_of::<Hash256>()..size_of::<Hash256>() + size_of::<u64>()],
-            value.value,
-        );
-        data
-    }
 }
 
 impl Bip300 {
@@ -331,6 +284,81 @@ impl Bip300 {
                 }
             }
         }
+
+        for transaction in &block.txdata[1..] {
+            // TODO: Check that there is only onen OP_DRIVECHAIN.
+            let mut new_ctip = None;
+            let mut sidechain_number = None;
+            let mut new_total_value = None;
+            for (vout, output) in transaction.output.iter().enumerate() {
+                let script = output.script_pubkey.to_bytes();
+                if script[0] == OP_DRIVECHAIN.to_u8() {
+                    if new_ctip.is_some() {
+                        return Err(miette!("more than one OP_DRIVECHAIN output"));
+                    }
+                    if script[1] != OP_PUSHBYTES_1.to_u8() {
+                        return Err(miette!("invalid OP_DRIVECHAIN output"));
+                    }
+                    if script[3] != OP_TRUE.to_u8() {
+                        return Err(miette!("invalid OP_DRIVECHAIN output"));
+                    }
+                    sidechain_number = Some(script[2]);
+                    new_ctip = Some(OutPoint {
+                        txid: transaction.txid(),
+                        vout: vout as u32,
+                    });
+                    new_total_value = Some(output.value.to_sat());
+                }
+            }
+            if let (Some(new_ctip), Some(sidechain_number), Some(new_total_value)) =
+                (new_ctip, sidechain_number, new_total_value)
+            {
+                let mut sidechain_number_to_ctip = write_txn
+                    .open_table(SIDECHAIN_NUMBER_TO_CTIP)
+                    .into_diagnostic()?;
+                let mut old_ctip_found = false;
+                let old_total_value = {
+                    let old_ctip = sidechain_number_to_ctip
+                        .get(sidechain_number)
+                        .into_diagnostic()?;
+                    if let Some(old_ctip) = old_ctip {
+                        for input in &transaction.input {
+                            if input.previous_output == old_ctip.value().outpoint {
+                                old_ctip_found = true;
+                            }
+                        }
+                        old_ctip.value().value
+                    } else {
+                        return Err(miette!("sidechain {sidechain_number} doesn't have ctip"));
+                    }
+                };
+                if old_ctip_found {
+                    if new_total_value >= old_total_value {
+                        // M5
+                        // deposit
+                        // What would happen if new CTIP value is equal to old CTIP value?
+                        // for now it is treated as a deposit of 0.
+                        let new_ctip = Ctip {
+                            outpoint: new_ctip,
+                            value: new_total_value,
+                        };
+                        sidechain_number_to_ctip
+                            .insert(sidechain_number, new_ctip)
+                            .into_diagnostic()?;
+                    } else {
+                        // M6
+                        // set correspondidng withdrawal bundle hash as spent
+                        todo!();
+                    }
+                } else {
+                    return Err(miette!(
+                        "old ctip wasn't spent for sidechain {sidechain_number}"
+                    ));
+                }
+            }
+            dbg!(transaction);
+        }
+
         write_txn.commit().into_diagnostic()?;
 
         {
@@ -351,11 +379,116 @@ impl Bip300 {
     }
 
     pub fn is_block_valid(&self, block: &Block) -> Result<()> {
+        // validate a block
         todo!();
     }
 
     pub fn is_transaction_valid(&self, transaction: &Transaction) -> Result<()> {
         todo!();
+    }
+}
+
+#[derive(Debug)]
+struct Ctip {
+    outpoint: OutPoint,
+    value: u64,
+}
+
+impl RedbValue for Ctip {
+    type SelfType<'a> = Ctip;
+    type AsBytes<'a> = [u8; size_of::<Ctip>()];
+
+    fn type_name() -> TypeName {
+        TypeName::new("Ctip")
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        [
+            value.outpoint.txid.to_byte_array().to_vec(),
+            value.outpoint.vout.to_be_bytes().to_vec(),
+            value.value.to_be_bytes().to_vec(),
+        ]
+        .concat()
+        .try_into()
+        .unwrap()
+    }
+
+    fn fixed_width() -> Option<usize> {
+        Some(size_of::<Ctip>())
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let txid = Txid::from_slice(&data[0..32]).unwrap();
+        let data = &data[32..];
+        let vout = BigEndian::read_u32(data);
+        let data = &data[4..];
+        let value = BigEndian::read_u64(data);
+        Ctip {
+            outpoint: OutPoint { txid, vout },
+            value,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Deposit {
+    address: Hash256,
+    value: u64,
+    total_value: u64,
+}
+
+impl RedbValue for Deposit {
+    type SelfType<'a> = Deposit;
+    type AsBytes<'a> = [u8; size_of::<Hash256>() + size_of::<u64>() + size_of::<u64>()];
+
+    fn type_name() -> TypeName {
+        TypeName::new("Deposit")
+    }
+
+    fn fixed_width() -> Option<usize> {
+        Some(size_of::<Hash256>() + size_of::<u64>())
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let address: Hash256 = data[0..size_of::<Hash256>()].try_into().unwrap();
+        let data = &data[size_of::<Hash256>()..];
+        let value = BigEndian::read_u64(data);
+        let data = &data[size_of::<u64>()..];
+        let total_value = BigEndian::read_u64(data);
+        Deposit {
+            address,
+            value,
+            total_value,
+        }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        let mut data = [0; size_of::<Hash256>() + size_of::<u64>() + size_of::<u64>()];
+        data[0..size_of::<Hash256>()].copy_from_slice(&value.address);
+        BigEndian::write_u64(
+            &mut data[size_of::<Hash256>()..size_of::<Hash256>() + size_of::<u64>()],
+            value.value,
+        );
+        BigEndian::write_u64(
+            &mut data[size_of::<Hash256>() + size_of::<u64>()
+                ..size_of::<Hash256>() + 2 * size_of::<u64>()],
+            value.total_value,
+        );
+        data
     }
 }
 

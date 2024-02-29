@@ -20,6 +20,8 @@ tonic = "0.10.2"
 ureq-jsonrpc = { git = "https://github.com/nchashch/ureq-jsonrpc" }
 bip300_messages = { git = "https://github.com/LayerTwo-Labs/bip300_messages" }
 sha2 = "0.10.8"
+log = "0.4.20"
+phf = "0.11.2"
 
 [build-dependencies]
 tonic-build = "0.10.2"
