@@ -55,18 +55,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
-// Sidechain proposals
-// Withdrawal bundles
-// BMM Requests
-// Deposit TXOs
-
-// M1 Propose Sidechain
-// M2 Ack Sidechain
-// M3 Propose Bundle
-// M4 Ack Bundles
-// M6 Withdraw
-// BMM Accept
-//
-// M5 Deposit
-// BMM Request

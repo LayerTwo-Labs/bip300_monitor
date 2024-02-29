@@ -1,14 +1,13 @@
-use bitcoin::opcodes::all::OP_PUSHBYTES_1;
-use bitcoin::opcodes::OP_TRUE;
-use bitcoin::{Amount, Block, OutPoint, Transaction, TxOut};
-use miette::{miette, IntoDiagnostic, Result};
-use redb::{Database, ReadableTable, TableDefinition};
+use crate::types::*;
 use bip300_messages::{
     parse_coinbase_script, sha256d, CoinbaseMessage, M4AckBundles, ABSTAIN_ONE_BYTE,
     ABSTAIN_TWO_BYTES, ALARM_ONE_BYTE, ALARM_TWO_BYTES, OP_DRIVECHAIN,
 };
-use crate::types::*;
-
+use bitcoin::opcodes::all::OP_PUSHBYTES_1;
+use bitcoin::opcodes::OP_TRUE;
+use bitcoin::{Block, OutPoint, Transaction};
+use miette::{miette, IntoDiagnostic, Result};
+use redb::{Database, ReadableTable, TableDefinition};
 
 const DATA_HASH_TO_SIDECHAIN_PROPOSAL: TableDefinition<&Hash256, SidechainProposal> =
     TableDefinition::new("data_hash_to_sidechain_proposal");
@@ -315,19 +314,7 @@ impl Bip300 {
             }
             dbg!(transaction);
         }
-
         write_txn.commit().into_diagnostic()?;
-
-        {
-            let read_txn = self.db.begin_read().into_diagnostic()?;
-            let table = read_txn
-                .open_table(DATA_HASH_TO_SIDECHAIN_PROPOSAL)
-                .into_diagnostic()?;
-            for item in table.iter().into_diagnostic()? {
-                let (key, value) = item.into_diagnostic()?;
-                dbg!(value.value());
-            }
-        }
         Ok(())
     }
 

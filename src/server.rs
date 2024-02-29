@@ -25,11 +25,9 @@ pub mod bip300 {
 impl Validator for Bip300 {
     async fn is_valid(
         &self,
-        request: Request<IsValidRequest>,
+        _request: Request<IsValidRequest>,
     ) -> Result<Response<IsValidResponse>, Status> {
-        //println!("REQUEST = {:?}", request);
-        let response = IsValidResponse { valid: true };
-        Ok(Response::new(response))
+        todo!();
     }
 
     async fn connect_block(
@@ -47,11 +45,9 @@ impl Validator for Bip300 {
 
     async fn disconnect_block(
         &self,
-        request: Request<DisconnectBlockRequest>,
+        _request: Request<DisconnectBlockRequest>,
     ) -> Result<Response<DisconnectBlockResponse>, Status> {
-        //println!("REQUEST = {:?}", request);
-        let response = DisconnectBlockResponse {};
-        Ok(Response::new(response))
+        todo!();
     }
 
     async fn get_coinbase_psbt(
@@ -142,6 +138,3 @@ impl Validator for Bip300 {
         Ok(Response::new(response))
     }
 }
-
-// What should happen if new CTIP value is equal to old CTIP value?
-// How is the deposit address encoded?
